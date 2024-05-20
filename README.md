@@ -3,7 +3,7 @@
 [![monolith build status on Windows](https://github.com/Y2Z/monolith/workflows/Windows/badge.svg)](https://github.com/Y2Z/monolith/actions?query=workflow%3AWindows)
 <br/>
 
-[![Apify Actor](https://apify-badger.vercel.app/badge/netmilk/monolith)](https://apify.com/netmilk/monolith)
+[![Apify Actor](https://apify-badger.vercel.app/badge/netmilk/monolith?type=classic)](https://apify.com/netmilk/monolith)
 
 ```
  _____     ______________    __________      ___________________    ___
