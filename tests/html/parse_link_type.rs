@@ -7,67 +7,31 @@
 
 #[cfg(test)]
 mod passing {
-    use monolith::url;
+    use monolith::html;
 
     #[test]
-    fn mailto() {
-        assert!(url::is_url_and_has_protocol(
-            "mailto:somebody@somewhere.com?subject=hello"
-        ));
+    fn icon() {
+        assert!(html::parse_link_type("icon").contains(&html::LinkType::Favicon));
     }
 
     #[test]
-    fn tel() {
-        assert!(url::is_url_and_has_protocol("tel:5551234567"));
+    fn shortcut_icon_capitalized() {
+        assert!(html::parse_link_type("Shortcut Icon").contains(&html::LinkType::Favicon));
     }
 
     #[test]
-    fn ftp_no_slashes() {
-        assert!(url::is_url_and_has_protocol("ftp:some-ftp-server.com"));
+    fn stylesheet() {
+        assert!(html::parse_link_type("stylesheet").contains(&html::LinkType::Stylesheet));
     }
 
     #[test]
-    fn ftp_with_credentials() {
-        assert!(url::is_url_and_has_protocol(
-            "ftp://user:password@some-ftp-server.com"
-        ));
+    fn preload_stylesheet() {
+        assert!(html::parse_link_type("preload stylesheet").contains(&html::LinkType::Stylesheet));
     }
 
     #[test]
-    fn javascript() {
-        assert!(url::is_url_and_has_protocol("javascript:void(0)"));
-    }
-
-    #[test]
-    fn http() {
-        assert!(url::is_url_and_has_protocol("http://news.ycombinator.com"));
-    }
-
-    #[test]
-    fn https() {
-        assert!(url::is_url_and_has_protocol("https://github.com"));
-    }
-
-    #[test]
-    fn file() {
-        assert!(url::is_url_and_has_protocol("file:///tmp/image.png"));
-    }
-
-    #[test]
-    fn mailto_uppercase() {
-        assert!(url::is_url_and_has_protocol(
-            "MAILTO:somebody@somewhere.com?subject=hello"
-        ));
-    }
-
-    #[test]
-    fn empty_data_url() {
-        assert!(url::is_url_and_has_protocol("data:text/html,"));
-    }
-
-    #[test]
-    fn empty_data_url_surrounded_by_spaces() {
-        assert!(url::is_url_and_has_protocol(" data:text/html, "));
+    fn apple_touch_icon() {
+        assert!(html::parse_link_type("apple-touch-icon").contains(&html::LinkType::AppleTouchIcon));
     }
 }
 
@@ -80,29 +44,20 @@ mod passing {
 
 #[cfg(test)]
 mod failing {
-    use monolith::url;
+    use monolith::html;
 
     #[test]
-    fn url_with_no_protocol() {
-        assert!(!url::is_url_and_has_protocol(
-            "//some-hostname.com/some-file.html"
-        ));
+    fn mask_icon() {
+        assert!(html::parse_link_type("mask-icon").is_empty());
     }
 
     #[test]
-    fn relative_path() {
-        assert!(!url::is_url_and_has_protocol(
-            "some-hostname.com/some-file.html"
-        ));
-    }
-
-    #[test]
-    fn relative_to_root_path() {
-        assert!(!url::is_url_and_has_protocol("/some-file.html"));
+    fn fluid_icon() {
+        assert!(html::parse_link_type("fluid-icon").is_empty());
     }
 
     #[test]
     fn empty_string() {
-        assert!(!url::is_url_and_has_protocol(""));
+        assert!(html::parse_link_type("").is_empty());
     }
 }

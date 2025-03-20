@@ -7,8 +7,8 @@
 
 #[cfg(test)]
 mod passing {
+    use monolith::core::Options;
     use monolith::html;
-    use monolith::opts::Options;
 
     #[test]
     fn div_as_root_element() {
@@ -33,11 +33,7 @@ mod passing {
         options.isolate = true;
 
         assert_eq!(
-            String::from_utf8_lossy(&html::serialize_document(
-                dom,
-                "".to_string(),
-                &options
-            )),
+            String::from_utf8_lossy(&html::serialize_document(dom, "".to_string(), &options)),
             "<html>\
                 <head>\
                     <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'unsafe-eval' 'unsafe-inline' data:;\"></meta>\
@@ -89,11 +85,7 @@ mod passing {
         options.no_frames = true;
 
         assert_eq!(
-            String::from_utf8_lossy(&html::serialize_document(
-                dom,
-                "".to_string(),
-                &options
-            )),
+            String::from_utf8_lossy(&html::serialize_document(dom, "".to_string(), &options)),
             "<!DOCTYPE html>\
                 <html>\
                 <head>\
@@ -127,11 +119,7 @@ mod passing {
         options.no_images = true;
 
         assert_eq!(
-            String::from_utf8_lossy(&html::serialize_document(
-                dom,
-                "".to_string(),
-                &options
-            )),
+            String::from_utf8_lossy(&html::serialize_document(dom, "".to_string(), &options)),
             "<!DOCTYPE html>\
                 <html>\
                     <head>\

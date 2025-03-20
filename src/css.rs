@@ -2,12 +2,11 @@ use cssparser::{
     serialize_identifier, serialize_string, ParseError, Parser, ParserInput, SourcePosition, Token,
 };
 use reqwest::blocking::Client;
-use std::collections::HashMap;
 use url::Url;
 
-use crate::opts::Options;
+use crate::cache::Cache;
+use crate::core::{retrieve_asset, Options};
 use crate::url::{create_data_url, resolve_url, EMPTY_IMAGE_DATA_URL};
-use crate::utils::retrieve_asset;
 
 const CSS_PROPS_WITH_IMAGE_URLS: &[&str] = &[
     // Universal
@@ -31,14 +30,13 @@ const CSS_PROPS_WITH_IMAGE_URLS: &[&str] = &[
 ];
 
 pub fn embed_css(
-    cache: &mut HashMap<String, Vec<u8>>,
+    cache: &mut Option<Cache>,
     client: &Client,
     document_url: &Url,
     css: &str,
     options: &Options,
-    depth: u32,
 ) -> String {
-    let mut input = ParserInput::new(&css);
+    let mut input = ParserInput::new(css);
     let mut parser = Parser::new(&mut input);
 
     process_css(
@@ -47,7 +45,6 @@ pub fn embed_css(
         document_url,
         &mut parser,
         options,
-        depth,
         "",
         "",
         "",
@@ -71,17 +68,15 @@ pub fn format_quoted_string(string: &str) -> String {
 pub fn is_image_url_prop(prop_name: &str) -> bool {
     CSS_PROPS_WITH_IMAGE_URLS
         .iter()
-        .find(|p| prop_name.eq_ignore_ascii_case(p))
-        .is_some()
+        .any(|p| prop_name.eq_ignore_ascii_case(p))
 }
 
 pub fn process_css<'a>(
-    cache: &mut HashMap<String, Vec<u8>>,
+    cache: &mut Option<Cache>,
     client: &Client,
     document_url: &Url,
     parser: &mut Parser,
     options: &Options,
-    depth: u32,
     rule_name: &str,
     prop_name: &str,
     func_name: &str,
@@ -107,9 +102,9 @@ pub fn process_css<'a>(
                 let token_slice = parser.slice_from(token_offset);
                 result.push_str(token_slice);
             }
-            Token::Semicolon => result.push_str(";"),
-            Token::Colon => result.push_str(":"),
-            Token::Comma => result.push_str(","),
+            Token::Semicolon => result.push(';'),
+            Token::Colon => result.push(':'),
+            Token::Comma => result.push(','),
             Token::ParenthesisBlock | Token::SquareBracketBlock | Token::CurlyBracketBlock => {
                 if options.no_fonts && curr_rule == "font-face" {
                     continue;
@@ -117,13 +112,13 @@ pub fn process_css<'a>(
 
                 let closure: &str;
                 if token == &Token::ParenthesisBlock {
-                    result.push_str("(");
+                    result.push('(');
                     closure = ")";
                 } else if token == &Token::SquareBracketBlock {
-                    result.push_str("[");
+                    result.push('[');
                     closure = "]";
                 } else {
-                    result.push_str("{");
+                    result.push('{');
                     closure = "}";
                 }
 
@@ -135,7 +130,6 @@ pub fn process_css<'a>(
                             document_url,
                             parser,
                             options,
-                            depth,
                             rule_name,
                             curr_prop.as_str(),
                             func_name,
@@ -146,9 +140,9 @@ pub fn process_css<'a>(
 
                 result.push_str(closure);
             }
-            Token::CloseParenthesis => result.push_str(")"),
-            Token::CloseSquareBracket => result.push_str("]"),
-            Token::CloseCurlyBracket => result.push_str("}"),
+            Token::CloseParenthesis => result.push(')'),
+            Token::CloseSquareBracket => result.push(']'),
+            Token::CloseCurlyBracket => result.push('}'),
             Token::IncludeMatch => result.push_str("~="),
             Token::DashMatch => result.push_str("|="),
             Token::PrefixMatch => result.push_str("^="),
@@ -156,7 +150,7 @@ pub fn process_css<'a>(
             Token::SubstringMatch => result.push_str("*="),
             Token::CDO => result.push_str("<!--"),
             Token::CDC => result.push_str("-->"),
-            Token::WhiteSpace(ref value) => {
+            Token::WhiteSpace(value) => {
                 result.push_str(value);
             }
             // div...
@@ -171,11 +165,11 @@ pub fn process_css<'a>(
                 if options.no_fonts && curr_rule == "font-face" {
                     continue;
                 }
-                result.push_str("@");
+                result.push('@');
                 result.push_str(value);
             }
             Token::Hash(ref value) => {
-                result.push_str("#");
+                result.push('#');
                 result.push_str(value);
             }
             Token::QuotedString(ref value) => {
@@ -189,15 +183,8 @@ pub fn process_css<'a>(
                         continue;
                     }
 
-                    let import_full_url: Url = resolve_url(&document_url, value);
-                    match retrieve_asset(
-                        cache,
-                        client,
-                        &document_url,
-                        &import_full_url,
-                        options,
-                        depth + 1,
-                    ) {
+                    let import_full_url: Url = resolve_url(document_url, value);
+                    match retrieve_asset(cache, client, document_url, &import_full_url, options) {
                         Ok((
                             import_contents,
                             import_final_url,
@@ -213,15 +200,13 @@ pub fn process_css<'a>(
                                     &import_final_url,
                                     &String::from_utf8_lossy(&import_contents),
                                     options,
-                                    depth + 1,
                                 )
                                 .as_bytes(),
                                 &import_final_url,
                             );
                             import_data_url.set_fragment(import_full_url.fragment());
-                            result.push_str(
-                                format_quoted_string(&import_data_url.to_string()).as_str(),
-                            );
+                            result
+                                .push_str(format_quoted_string(import_data_url.as_ref()).as_str());
                         }
                         Err(_) => {
                             // Keep remote reference if unable to retrieve the asset
@@ -229,54 +214,42 @@ pub fn process_css<'a>(
                                 || import_full_url.scheme() == "https"
                             {
                                 result.push_str(
-                                    format_quoted_string(&import_full_url.to_string()).as_str(),
+                                    format_quoted_string(import_full_url.as_ref()).as_str(),
                                 );
                             }
                         }
                     }
-                } else {
-                    if func_name == "url" {
-                        // Skip empty url()'s
-                        if value.len() == 0 {
-                            continue;
-                        }
+                } else if func_name == "url" {
+                    // Skip empty url()'s
+                    if value.len() == 0 {
+                        continue;
+                    }
 
-                        if options.no_images && is_image_url_prop(curr_prop.as_str()) {
-                            result.push_str(format_quoted_string(EMPTY_IMAGE_DATA_URL).as_str());
-                        } else {
-                            let resolved_url: Url = resolve_url(&document_url, value);
-                            match retrieve_asset(
-                                cache,
-                                client,
-                                &document_url,
-                                &resolved_url,
-                                options,
-                                depth + 1,
-                            ) {
-                                Ok((data, final_url, media_type, charset)) => {
-                                    let mut data_url =
-                                        create_data_url(&media_type, &charset, &data, &final_url);
-                                    data_url.set_fragment(resolved_url.fragment());
+                    if options.no_images && is_image_url_prop(curr_prop.as_str()) {
+                        result.push_str(format_quoted_string(EMPTY_IMAGE_DATA_URL).as_str());
+                    } else {
+                        let resolved_url: Url = resolve_url(document_url, value);
+                        match retrieve_asset(cache, client, document_url, &resolved_url, options) {
+                            Ok((data, final_url, media_type, charset)) => {
+                                let mut data_url =
+                                    create_data_url(&media_type, &charset, &data, &final_url);
+                                data_url.set_fragment(resolved_url.fragment());
+                                result.push_str(format_quoted_string(data_url.as_ref()).as_str());
+                            }
+                            Err(_) => {
+                                // Keep remote reference if unable to retrieve the asset
+                                if resolved_url.scheme() == "http"
+                                    || resolved_url.scheme() == "https"
+                                {
                                     result.push_str(
-                                        format_quoted_string(&data_url.to_string()).as_str(),
+                                        format_quoted_string(resolved_url.as_ref()).as_str(),
                                     );
-                                }
-                                Err(_) => {
-                                    // Keep remote reference if unable to retrieve the asset
-                                    if resolved_url.scheme() == "http"
-                                        || resolved_url.scheme() == "https"
-                                    {
-                                        result.push_str(
-                                            format_quoted_string(&resolved_url.to_string())
-                                                .as_str(),
-                                        );
-                                    }
                                 }
                             }
                         }
-                    } else {
-                        result.push_str(format_quoted_string(value).as_str());
                     }
+                } else {
+                    result.push_str(format_quoted_string(value).as_str());
                 }
             }
             Token::Number {
@@ -285,7 +258,7 @@ pub fn process_css<'a>(
                 ..
             } => {
                 if *has_sign && *value >= 0. {
-                    result.push_str("+");
+                    result.push('+');
                 }
                 result.push_str(&value.to_string())
             }
@@ -295,10 +268,10 @@ pub fn process_css<'a>(
                 ..
             } => {
                 if *has_sign && *unit_value >= 0. {
-                    result.push_str("+");
+                    result.push('+');
                 }
                 result.push_str(&(unit_value * 100.0).to_string());
-                result.push_str("%");
+                result.push('%');
             }
             Token::Dimension {
                 ref has_sign,
@@ -307,15 +280,15 @@ pub fn process_css<'a>(
                 ..
             } => {
                 if *has_sign && *value >= 0. {
-                    result.push_str("+");
+                    result.push('+');
                 }
                 result.push_str(&value.to_string());
-                result.push_str(&unit.to_string());
+                result.push_str(unit.as_ref());
             }
             // #selector, #id...
             Token::IDHash(ref value) => {
                 curr_rule = "".to_string();
-                result.push_str("#");
+                result.push('#');
                 result.push_str(&format_ident(value));
             }
             // url()
@@ -334,21 +307,14 @@ pub fn process_css<'a>(
                 } else if value.starts_with("#") {
                     result.push_str("url(");
                     result.push_str(value);
-                    result.push_str(")");
+                    result.push(')');
                     continue;
                 }
 
                 result.push_str("url(");
                 if is_import {
-                    let full_url: Url = resolve_url(&document_url, value);
-                    match retrieve_asset(
-                        cache,
-                        client,
-                        &document_url,
-                        &full_url,
-                        options,
-                        depth + 1,
-                    ) {
+                    let full_url: Url = resolve_url(document_url, value);
+                    match retrieve_asset(cache, client, document_url, &full_url, options) {
                         Ok((css, final_url, media_type, charset)) => {
                             let mut data_url = create_data_url(
                                 &media_type,
@@ -359,61 +325,47 @@ pub fn process_css<'a>(
                                     &final_url,
                                     &String::from_utf8_lossy(&css),
                                     options,
-                                    depth + 1,
                                 )
                                 .as_bytes(),
                                 &final_url,
                             );
                             data_url.set_fragment(full_url.fragment());
-                            result.push_str(format_quoted_string(&data_url.to_string()).as_str());
+                            result.push_str(format_quoted_string(data_url.as_ref()).as_str());
                         }
                         Err(_) => {
                             // Keep remote reference if unable to retrieve the asset
                             if full_url.scheme() == "http" || full_url.scheme() == "https" {
-                                result
-                                    .push_str(format_quoted_string(&full_url.to_string()).as_str());
+                                result.push_str(format_quoted_string(full_url.as_ref()).as_str());
                             }
                         }
                     }
+                } else if is_image_url_prop(curr_prop.as_str()) && options.no_images {
+                    result.push_str(format_quoted_string(EMPTY_IMAGE_DATA_URL).as_str());
                 } else {
-                    if is_image_url_prop(curr_prop.as_str()) && options.no_images {
-                        result.push_str(format_quoted_string(EMPTY_IMAGE_DATA_URL).as_str());
-                    } else {
-                        let full_url: Url = resolve_url(&document_url, value);
-                        match retrieve_asset(
-                            cache,
-                            client,
-                            &document_url,
-                            &full_url,
-                            options,
-                            depth + 1,
-                        ) {
-                            Ok((data, final_url, media_type, charset)) => {
-                                let mut data_url =
-                                    create_data_url(&media_type, &charset, &data, &final_url);
-                                data_url.set_fragment(full_url.fragment());
-                                result
-                                    .push_str(format_quoted_string(&data_url.to_string()).as_str());
-                            }
-                            Err(_) => {
-                                // Keep remote reference if unable to retrieve the asset
-                                if full_url.scheme() == "http" || full_url.scheme() == "https" {
-                                    result.push_str(
-                                        format_quoted_string(&full_url.to_string()).as_str(),
-                                    );
-                                }
+                    let full_url: Url = resolve_url(document_url, value);
+                    match retrieve_asset(cache, client, document_url, &full_url, options) {
+                        Ok((data, final_url, media_type, charset)) => {
+                            let mut data_url =
+                                create_data_url(&media_type, &charset, &data, &final_url);
+                            data_url.set_fragment(full_url.fragment());
+                            result.push_str(format_quoted_string(data_url.as_ref()).as_str());
+                        }
+                        Err(_) => {
+                            // Keep remote reference if unable to retrieve the asset
+                            if full_url.scheme() == "http" || full_url.scheme() == "https" {
+                                result.push_str(format_quoted_string(full_url.as_ref()).as_str());
                             }
                         }
                     }
                 }
-                result.push_str(")");
+                result.push(')');
             }
             // =
-            Token::Delim(ref value) => result.push_str(&value.to_string()),
+            Token::Delim(ref value) => result.push(*value),
             Token::Function(ref name) => {
                 let function_name: &str = &name.clone();
                 result.push_str(function_name);
-                result.push_str("(");
+                result.push('(');
 
                 let block_css: String = parser
                     .parse_nested_block(|parser| {
@@ -423,7 +375,6 @@ pub fn process_css<'a>(
                             document_url,
                             parser,
                             options,
-                            depth,
                             curr_rule.as_str(),
                             curr_prop.as_str(),
                             function_name,
@@ -432,14 +383,14 @@ pub fn process_css<'a>(
                     .unwrap();
                 result.push_str(block_css.as_str());
 
-                result.push_str(")");
+                result.push(')');
             }
             Token::BadUrl(_) | Token::BadString(_) => {}
         }
     }
 
     // Ensure empty CSS is really empty
-    if result.len() > 0 && result.trim().len() == 0 {
+    if !result.is_empty() && result.trim().is_empty() {
         result = result.trim().to_string()
     }
 

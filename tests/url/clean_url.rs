@@ -46,7 +46,7 @@ mod passing {
     }
 
     #[test]
-    fn removesempty_fragment_and_keeps_empty_query() {
+    fn removes_empty_fragment_and_keeps_query() {
         assert_eq!(
             url::clean_url(Url::parse("https://somewhere.com/font.eot?a=b&#").unwrap()).as_str(),
             "https://somewhere.com/font.eot?a=b&"

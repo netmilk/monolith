@@ -67,7 +67,9 @@ mod passing {
         // STDOUT should contain HTML created out of STDIN
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "<html><head></head><body>Hello from STDIN\n</body></html>\n"
+            r#"<html><head></head><body>Hello from STDIN
+</body></html>
+"#
         );
 
         // Exit code should be 0
@@ -90,20 +92,32 @@ mod passing {
             String::from_utf8_lossy(&out.stderr),
             format!(
                 "\
-                {file_url_html}\n \
-                {file_url_css}\n \
-                {file_url_css}\n \
+                {file_url_html}\n\
+                {file_url_css}\n\
+                {file_url_css}\n\
                 {file_url_css}\n\
                 ",
-                file_url_html = Url::from_file_path(fs::canonicalize(&path_html).unwrap()).unwrap(),
-                file_url_css = Url::from_file_path(fs::canonicalize(&path_css).unwrap()).unwrap(),
+                file_url_html = Url::from_file_path(fs::canonicalize(path_html).unwrap()).unwrap(),
+                file_url_css = Url::from_file_path(fs::canonicalize(path_css).unwrap()).unwrap(),
             )
         );
 
         // STDOUT should contain embedded CSS url()'s
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "<html><head><style>\n\n    @charset \"UTF-8\";\n\n    @import \"data:text/css;base64,Ym9keXtiYWNrZ3JvdW5kLWNvbG9yOiMwMDA7Y29sb3I6I2ZmZn0K\";\n\n    @import url(\"data:text/css;base64,Ym9keXtiYWNrZ3JvdW5kLWNvbG9yOiMwMDA7Y29sb3I6I2ZmZn0K\");\n\n    @import url(\"data:text/css;base64,Ym9keXtiYWNrZ3JvdW5kLWNvbG9yOiMwMDA7Y29sb3I6I2ZmZn0K\");\n\n</style>\n</head><body></body></html>\n"
+            r##"<html><head><style>
+
+    @charset "UTF-8";
+
+    @import "data:text/css;base64,Ym9keXtiYWNrZ3JvdW5kLWNvbG9yOiMwMDA7Y29sb3I6I2ZmZn0K";
+
+    @import url("data:text/css;base64,Ym9keXtiYWNrZ3JvdW5kLWNvbG9yOiMwMDA7Y29sb3I6I2ZmZn0K");
+
+    @import url("data:text/css;base64,Ym9keXtiYWNrZ3JvdW5kLWNvbG9yOiMwMDA7Y29sb3I6I2ZmZn0K");
+
+</style>
+</head><body></body></html>
+"##
         );
 
         // Exit code should be 0
@@ -132,7 +146,25 @@ mod failing {
         // STDERR should contain error description
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
-            "No target specified\n"
+            "Error: no target specified\n"
+        );
+
+        // STDOUT should be empty
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+
+        // Exit code should be 1
+        out.assert().code(1);
+    }
+
+    #[test]
+    fn unsupported_scheme() {
+        let mut cmd = Command::cargo_bin(env!("CARGO_PKG_NAME")).unwrap();
+        let out = cmd.arg("mailto:snshn@tutanota.com").output().unwrap();
+
+        // STDERR should contain error description
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "Error: unsupported target URL scheme \"mailto\"\n"
         );
 
         // STDOUT should be empty

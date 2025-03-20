@@ -1,34 +1,44 @@
 use base64::prelude::*;
 use chrono::prelude::*;
 use encoding_rs::Encoding;
-use html5ever::interface::QualName;
+use html5ever::interface::{Attribute, QualName};
 use html5ever::parse_document;
 use html5ever::serialize::{serialize, SerializeOpts};
 use html5ever::tendril::{format_tendril, TendrilSink};
-use html5ever::tree_builder::{Attribute, TreeSink};
-use html5ever::{local_name, namespace_url, ns, LocalName};
+use html5ever::tree_builder::{create_element, TreeSink};
+use html5ever::{namespace_url, ns, LocalName};
 use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
 use regex::Regex;
 use reqwest::blocking::Client;
 use reqwest::Url;
 use sha2::{Digest, Sha256, Sha384, Sha512};
-use std::collections::HashMap;
 use std::default::Default;
 
+use crate::cache::Cache;
+use crate::core::{parse_content_type, retrieve_asset, Options};
 use crate::css::embed_css;
 use crate::js::attr_is_event_handler;
-use crate::opts::Options;
 use crate::url::{
     clean_url, create_data_url, is_url_and_has_protocol, resolve_url, EMPTY_IMAGE_DATA_URL,
 };
-use crate::utils::{parse_content_type, retrieve_asset};
+
+#[derive(PartialEq, Eq)]
+pub enum LinkType {
+    Alternate,
+    AppleTouchIcon,
+    DnsPrefetch,
+    Favicon,
+    Preload,
+    Stylesheet,
+}
 
 struct SrcSetItem<'a> {
     path: &'a str,
     descriptor: &'a str,
 }
 
-const ICON_VALUES: &'static [&str] = &["icon", "shortcut icon"];
+const FAVICON_VALUES: &[&str] = &["icon", "shortcut icon"];
+const WHITESPACES: &[char] = &['\t', '\n', '\x0c', '\r', ' '];
 
 pub fn add_favicon(document: &Handle, favicon_data_url: String) -> RcDom {
     let mut buf: Vec<u8> = Vec::new();
@@ -39,27 +49,25 @@ pub fn add_favicon(document: &Handle, favicon_data_url: String) -> RcDom {
     )
     .expect("unable to serialize DOM into buffer");
 
-    let mut dom = html_to_dom(&buf, "utf-8".to_string());
-    let doc = dom.get_document();
-    if let Some(html) = get_child_node_by_name(&doc, "html") {
-        if let Some(head) = get_child_node_by_name(&html, "head") {
-            let favicon_node = dom.create_element(
-                QualName::new(None, ns!(), local_name!("link")),
-                vec![
-                    Attribute {
-                        name: QualName::new(None, ns!(), local_name!("rel")),
-                        value: format_tendril!("icon"),
-                    },
-                    Attribute {
-                        name: QualName::new(None, ns!(), local_name!("href")),
-                        value: format_tendril!("{}", favicon_data_url),
-                    },
-                ],
-                Default::default(),
-            );
-            // Insert favicon LINK tag into HEAD
-            head.children.borrow_mut().push(favicon_node.clone());
-        }
+    let dom = html_to_dom(&buf, "utf-8".to_string());
+    for head in find_nodes(&dom.document, vec!["html", "head"]).iter() {
+        let favicon_node = create_element(
+            &dom,
+            QualName::new(None, ns!(), LocalName::from("link")),
+            vec![
+                Attribute {
+                    name: QualName::new(None, ns!(), LocalName::from("rel")),
+                    value: format_tendril!("icon"),
+                },
+                Attribute {
+                    name: QualName::new(None, ns!(), LocalName::from("href")),
+                    value: format_tendril!("{}", favicon_data_url),
+                },
+            ],
+        );
+
+        // Insert favicon LINK tag into HEAD
+        head.children.borrow_mut().push(favicon_node.clone());
     }
 
     dom
@@ -116,7 +124,7 @@ pub fn compose_csp(options: &Options) -> String {
 }
 
 pub fn create_metadata_tag(url: &Url) -> String {
-    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let datetime: &str = &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let mut clean_url: Url = clean_url(url.clone());
 
     // Prevent credentials from getting into metadata
@@ -129,51 +137,60 @@ pub fn create_metadata_tag(url: &Url) -> String {
     format!(
         "<!-- Saved from {} at {} using {} v{} -->",
         if clean_url.scheme() == "http" || clean_url.scheme() == "https" {
-            &clean_url.as_str()
+            clean_url.as_str()
         } else {
             "local source"
         },
-        timestamp,
+        datetime,
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
     )
 }
 
-pub fn determine_link_node_type(node: &Handle) -> &str {
-    let mut link_type: &str = "unknown";
-
-    if let Some(link_attr_rel_value) = get_node_attr(node, "rel") {
-        if is_icon(&link_attr_rel_value) {
-            link_type = "icon";
-        } else if link_attr_rel_value.eq_ignore_ascii_case("stylesheet")
-            || link_attr_rel_value.eq_ignore_ascii_case("alternate stylesheet")
-        {
-            link_type = "stylesheet";
-        } else if link_attr_rel_value.eq_ignore_ascii_case("preload") {
-            link_type = "preload";
-        } else if link_attr_rel_value.eq_ignore_ascii_case("dns-prefetch") {
-            link_type = "dns-prefetch";
-        }
-    }
-
-    link_type
-}
-
 pub fn embed_srcset(
-    cache: &mut HashMap<String, Vec<u8>>,
+    cache: &mut Option<Cache>,
     client: &Client,
     document_url: &Url,
     srcset: &str,
     options: &Options,
-    depth: u32,
 ) -> String {
     let mut array: Vec<SrcSetItem> = vec![];
-    let re = Regex::new(r",\s+").unwrap();
-    for srcset_item in re.split(srcset) {
-        let parts: Vec<&str> = srcset_item.trim().split_whitespace().collect();
-        if parts.len() > 0 {
-            let path = parts[0].trim();
-            let descriptor = if parts.len() > 1 { parts[1].trim() } else { "" };
+
+    // Parse srcset attribute according to the specs
+    // https://html.spec.whatwg.org/multipage/images.html#srcset-attribute
+    let mut offset = 0;
+    let size = srcset.chars().count();
+
+    while offset < size {
+        let mut has_descriptor = true;
+        // Zero or more whitespaces + skip leading comma
+        let url_start = offset
+            + srcset[offset..]
+                .chars()
+                .take_while(|&c| WHITESPACES.contains(&c) || c == ',')
+                .count();
+        if url_start >= size {
+            break;
+        }
+        // A valid non-empty URL that does not start or end with comma
+        let mut url_end = url_start
+            + srcset[url_start..]
+                .chars()
+                .take_while(|&c| !WHITESPACES.contains(&c))
+                .count();
+        while (url_end - 1) > url_start && srcset.chars().nth(url_end - 1).unwrap() == ',' {
+            has_descriptor = false;
+            url_end -= 1;
+        }
+        offset = url_end;
+        // If the URL wasn't terminated by comma there may also be a descriptor
+        if has_descriptor {
+            offset += srcset[url_end..].chars().take_while(|&c| c != ',').count();
+        }
+        // Collect SrcSetItem
+        if url_end > url_start {
+            let path = &srcset[url_start..url_end];
+            let descriptor = &srcset[url_end..offset].trim();
             let srcset_real_item = SrcSetItem { path, descriptor };
             array.push(srcset_real_item);
         }
@@ -185,15 +202,8 @@ pub fn embed_srcset(
         if options.no_images {
             result.push_str(EMPTY_IMAGE_DATA_URL);
         } else {
-            let image_full_url: Url = resolve_url(&document_url, part.path);
-            match retrieve_asset(
-                cache,
-                client,
-                &document_url,
-                &image_full_url,
-                options,
-                depth + 1,
-            ) {
+            let image_full_url: Url = resolve_url(document_url, part.path);
+            match retrieve_asset(cache, client, document_url, &image_full_url, options) {
                 Ok((image_data, image_final_url, image_media_type, image_charset)) => {
                     let mut image_data_url = create_data_url(
                         &image_media_type,
@@ -218,7 +228,7 @@ pub fn embed_srcset(
         }
 
         if !part.descriptor.is_empty() {
-            result.push_str(" ");
+            result.push(' ');
             result.push_str(part.descriptor);
         }
 
@@ -232,120 +242,80 @@ pub fn embed_srcset(
     result
 }
 
-pub fn find_base_node(node: &Handle) -> Option<Handle> {
-    match node.data {
-        NodeData::Document => {
-            // Dig deeper
-            for child in node.children.borrow().iter() {
-                if let Some(base_node) = find_base_node(child) {
-                    return Some(base_node);
-                }
-            }
-        }
-        NodeData::Element { ref name, .. } => {
-            match name.local.as_ref() {
-                "head" => {
-                    return get_child_node_by_name(node, "base");
-                }
-                _ => {}
-            }
+pub fn find_nodes(node: &Handle, mut path: Vec<&str>) -> Vec<Handle> {
+    let mut result = vec![];
 
-            // Dig deeper
-            for child in node.children.borrow().iter() {
-                if let Some(base_node) = find_base_node(child) {
-                    return Some(base_node);
-                }
-            }
-        }
-        _ => {}
-    }
-
-    None
-}
-
-pub fn find_meta_charset_or_content_type_node(node: &Handle) -> Option<Handle> {
-    match node.data {
-        NodeData::Document => {
-            // Dig deeper
-            for child in node.children.borrow().iter() {
-                if let Some(meta_charset_node) = find_meta_charset_or_content_type_node(child) {
-                    return Some(meta_charset_node);
-                }
-            }
-        }
-        NodeData::Element { ref name, .. } => {
-            match name.local.as_ref() {
-                "head" => {
-                    if let Some(meta_node) = get_child_node_by_name(node, "meta") {
-                        if let Some(_) = get_node_attr(&meta_node, "charset") {
-                            return Some(meta_node);
-                        } else if let Some(meta_node_http_equiv_attr_value) =
-                            get_node_attr(&meta_node, "http-equiv")
-                        {
-                            if meta_node_http_equiv_attr_value.eq_ignore_ascii_case("content-type")
-                            {
-                                return Some(meta_node);
-                            }
+    while !path.is_empty() {
+        match node.data {
+            NodeData::Document | NodeData::Element { .. } => {
+                // Dig deeper
+                for child in node.children.borrow().iter() {
+                    if get_node_name(child)
+                        .unwrap_or_default()
+                        .eq_ignore_ascii_case(path[0])
+                    {
+                        if path.len() == 1 {
+                            result.push(child.clone());
+                        } else {
+                            result.append(&mut find_nodes(child, path[1..].to_vec()));
                         }
                     }
                 }
-                _ => {}
             }
-
-            // Dig deeper
-            for child in node.children.borrow().iter() {
-                if let Some(meta_charset_node) = find_meta_charset_or_content_type_node(child) {
-                    return Some(meta_charset_node);
-                }
-            }
+            _ => {}
         }
-        _ => {}
+
+        path.remove(0);
+    }
+
+    result
+}
+
+pub fn get_base_url(handle: &Handle) -> Option<String> {
+    for base_node in find_nodes(handle, vec!["html", "head", "base"]).iter() {
+        // Only the first base tag matters (we ignore the rest, if there's any)
+        return get_node_attr(base_node, "href");
     }
 
     None
 }
 
-pub fn get_base_url(handle: &Handle) -> Option<String> {
-    if let Some(base_node) = find_base_node(handle) {
-        get_node_attr(&base_node, "href")
-    } else {
-        None
-    }
-}
-
 pub fn get_charset(node: &Handle) -> Option<String> {
-    if let Some(meta_charset_node) = find_meta_charset_or_content_type_node(node) {
-        if let Some(meta_charset_node_attr_value) = get_node_attr(&meta_charset_node, "charset") {
+    for meta_node in find_nodes(node, vec!["html", "head", "meta"]).iter() {
+        if let Some(meta_charset_node_attr_value) = get_node_attr(meta_node, "charset") {
             // Processing <meta charset="..." />
             return Some(meta_charset_node_attr_value);
-        } else if let Some(meta_content_type_node_attr_value) =
-            get_node_attr(&meta_charset_node, "content")
+        }
+
+        if get_node_attr(meta_node, "http-equiv")
+            .unwrap_or_default()
+            .eq_ignore_ascii_case("content-type")
         {
-            // Processing <meta http-equiv="content-type" content="text/html; charset=..." />
-            let (_media_type, charset, _is_base64) =
-                parse_content_type(&meta_content_type_node_attr_value);
-            return Some(charset);
+            if let Some(meta_content_type_node_attr_value) = get_node_attr(meta_node, "content") {
+                // Processing <meta http-equiv="content-type" content="text/html; charset=..." />
+                let (_media_type, charset, _is_base64) =
+                    parse_content_type(&meta_content_type_node_attr_value);
+                return Some(charset);
+            }
         }
     }
 
-    return None;
+    None
 }
 
+// TODO: get rid of this function (replace with find_nodes)
 pub fn get_child_node_by_name(parent: &Handle, node_name: &str) -> Option<Handle> {
     let children = parent.children.borrow();
     let matching_children = children.iter().find(|child| match child.data {
         NodeData::Element { ref name, .. } => &*name.local == node_name,
         _ => false,
     });
-    match matching_children {
-        Some(node) => Some(node.clone()),
-        _ => None,
-    }
+    matching_children.cloned()
 }
 
 pub fn get_node_attr(node: &Handle, attr_name: &str) -> Option<String> {
     match &node.data {
-        NodeData::Element { ref attrs, .. } => {
+        NodeData::Element { attrs, .. } => {
             for attr in attrs.borrow().iter() {
                 if &*attr.name.local == attr_name {
                     return Some(attr.value.to_string());
@@ -359,7 +329,7 @@ pub fn get_node_attr(node: &Handle, attr_name: &str) -> Option<String> {
 
 pub fn get_node_name(node: &Handle) -> Option<&'_ str> {
     match &node.data {
-        NodeData::Element { ref name, .. } => Some(name.local.as_ref()),
+        NodeData::Element { name, .. } => Some(name.local.as_ref()),
         _ => None,
     }
 }
@@ -369,42 +339,28 @@ pub fn get_parent_node(child: &Handle) -> Handle {
     parent.and_then(|node| node.upgrade()).unwrap()
 }
 
+pub fn get_title(node: &Handle) -> Option<String> {
+    for title_node in find_nodes(node, vec!["html", "head", "title"]).iter() {
+        for child_node in title_node.children.borrow().iter() {
+            if let NodeData::Text { ref contents } = child_node.data {
+                return Some(contents.borrow().to_string());
+            }
+        }
+    }
+
+    None
+}
+
 pub fn has_favicon(handle: &Handle) -> bool {
     let mut found_favicon: bool = false;
 
-    match handle.data {
-        NodeData::Document => {
-            // Dig deeper
-            for child in handle.children.borrow().iter() {
-                if has_favicon(child) {
-                    found_favicon = true;
-                    break;
-                }
+    for link_node in find_nodes(handle, vec!["html", "head", "link"]).iter() {
+        if let Some(attr_value) = get_node_attr(link_node, "rel") {
+            if is_favicon(attr_value.trim()) {
+                found_favicon = true;
+                break;
             }
         }
-        NodeData::Element { ref name, .. } => {
-            match name.local.as_ref() {
-                "link" => {
-                    if let Some(attr_value) = get_node_attr(handle, "rel") {
-                        if is_icon(attr_value.trim()) {
-                            found_favicon = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-            if !found_favicon {
-                // Dig deeper
-                for child in handle.children.borrow().iter() {
-                    if has_favicon(child) {
-                        found_favicon = true;
-                        break;
-                    }
-                }
-            }
-        }
-        _ => {}
     }
 
     found_favicon
@@ -414,10 +370,10 @@ pub fn html_to_dom(data: &Vec<u8>, document_encoding: String) -> RcDom {
     let s: String;
 
     if let Some(encoding) = Encoding::for_label(document_encoding.as_bytes()) {
-        let (string, _, _) = encoding.decode(&data);
+        let (string, _, _) = encoding.decode(data);
         s = string.to_string();
     } else {
-        s = String::from_utf8_lossy(&data).to_string();
+        s = String::from_utf8_lossy(data).to_string();
     }
 
     parse_document(RcDom::default(), Default::default())
@@ -426,8 +382,30 @@ pub fn html_to_dom(data: &Vec<u8>, document_encoding: String) -> RcDom {
         .unwrap()
 }
 
-pub fn is_icon(attr_value: &str) -> bool {
-    ICON_VALUES.contains(&attr_value.to_lowercase().as_str())
+pub fn is_favicon(attr_value: &str) -> bool {
+    FAVICON_VALUES.contains(&attr_value.to_lowercase().as_str())
+}
+
+pub fn parse_link_type(link_attr_rel_value: &str) -> Vec<LinkType> {
+    let mut types: Vec<LinkType> = vec![];
+
+    for link_attr_rel_type in link_attr_rel_value.split_whitespace() {
+        if link_attr_rel_type.eq_ignore_ascii_case("alternate") {
+            types.push(LinkType::Alternate);
+        } else if link_attr_rel_type.eq_ignore_ascii_case("dns-prefetch") {
+            types.push(LinkType::DnsPrefetch);
+        } else if link_attr_rel_type.eq_ignore_ascii_case("preload") {
+            types.push(LinkType::Preload);
+        } else if link_attr_rel_type.eq_ignore_ascii_case("stylesheet") {
+            types.push(LinkType::Stylesheet);
+        } else if is_favicon(link_attr_rel_type) {
+            types.push(LinkType::Favicon);
+        } else if link_attr_rel_type.eq_ignore_ascii_case("apple-touch-icon") {
+            types.push(LinkType::AppleTouchIcon);
+        }
+    }
+
+    types
 }
 
 pub fn set_base_url(document: &Handle, desired_base_href: String) -> RcDom {
@@ -438,22 +416,21 @@ pub fn set_base_url(document: &Handle, desired_base_href: String) -> RcDom {
         SerializeOpts::default(),
     )
     .expect("unable to serialize DOM into buffer");
+    let dom = html_to_dom(&buf, "utf-8".to_string());
 
-    let mut dom = html_to_dom(&buf, "utf-8".to_string());
-    let doc = dom.get_document();
-    if let Some(html_node) = get_child_node_by_name(&doc, "html") {
+    if let Some(html_node) = get_child_node_by_name(&dom.document, "html") {
         if let Some(head_node) = get_child_node_by_name(&html_node, "head") {
             // Check if BASE node already exists in the DOM tree
             if let Some(base_node) = get_child_node_by_name(&head_node, "base") {
                 set_node_attr(&base_node, "href", Some(desired_base_href));
             } else {
-                let base_node = dom.create_element(
-                    QualName::new(None, ns!(), local_name!("base")),
+                let base_node = create_element(
+                    &dom,
+                    QualName::new(None, ns!(), LocalName::from("base")),
                     vec![Attribute {
-                        name: QualName::new(None, ns!(), local_name!("href")),
+                        name: QualName::new(None, ns!(), LocalName::from("href")),
                         value: format_tendril!("{}", desired_base_href),
                     }],
-                    Default::default(),
                 );
 
                 // Insert newly created BASE node into HEAD
@@ -465,35 +442,44 @@ pub fn set_base_url(document: &Handle, desired_base_href: String) -> RcDom {
     dom
 }
 
-pub fn set_charset(mut dom: RcDom, desired_charset: String) -> RcDom {
-    if let Some(meta_charset_node) = find_meta_charset_or_content_type_node(&dom.document) {
-        if let Some(_) = get_node_attr(&meta_charset_node, "charset") {
-            set_node_attr(&meta_charset_node, "charset", Some(desired_charset));
-        } else if let Some(_) = get_node_attr(&meta_charset_node, "content") {
+pub fn set_charset(dom: RcDom, desired_charset: String) -> RcDom {
+    for meta_node in find_nodes(&dom.document, vec!["html", "head", "meta"]).iter() {
+        if get_node_attr(meta_node, "charset").is_some() {
+            set_node_attr(meta_node, "charset", Some(desired_charset));
+            return dom;
+        }
+
+        if get_node_attr(meta_node, "http-equiv")
+            .unwrap_or_default()
+            .eq_ignore_ascii_case("content-type")
+            && get_node_attr(meta_node, "content").is_some()
+        {
             set_node_attr(
-                &meta_charset_node,
+                meta_node,
                 "content",
                 Some(format!("text/html;charset={}", desired_charset)),
             );
+            return dom;
         }
-    } else {
-        let meta_charset_node = dom.create_element(
-            QualName::new(None, ns!(), local_name!("meta")),
+    }
+
+    // Manually append charset META node to HEAD
+    {
+        let meta_charset_node: Handle = create_element(
+            &dom,
+            QualName::new(None, ns!(), LocalName::from("meta")),
             vec![Attribute {
-                name: QualName::new(None, ns!(), local_name!("charset")),
+                name: QualName::new(None, ns!(), LocalName::from("charset")),
                 value: format_tendril!("{}", desired_charset),
             }],
-            Default::default(),
         );
 
         // Insert newly created META charset node into HEAD
-        if let Some(html_node) = get_child_node_by_name(&dom.document, "html") {
-            if let Some(head_node) = get_child_node_by_name(&html_node, "head") {
-                head_node
-                    .children
-                    .borrow_mut()
-                    .push(meta_charset_node.clone());
-            }
+        for head_node in find_nodes(&dom.document, vec!["html", "head"]).iter() {
+            head_node
+                .children
+                .borrow_mut()
+                .push(meta_charset_node.clone());
         }
     }
 
@@ -501,48 +487,44 @@ pub fn set_charset(mut dom: RcDom, desired_charset: String) -> RcDom {
 }
 
 pub fn set_node_attr(node: &Handle, attr_name: &str, attr_value: Option<String>) {
-    match &node.data {
-        NodeData::Element { ref attrs, .. } => {
-            let attrs_mut = &mut attrs.borrow_mut();
-            let mut i = 0;
-            let mut found_existing_attr: bool = false;
+    if let NodeData::Element { attrs, .. } = &node.data {
+        let attrs_mut = &mut attrs.borrow_mut();
+        let mut i = 0;
+        let mut found_existing_attr: bool = false;
 
-            while i < attrs_mut.len() {
-                if &attrs_mut[i].name.local == attr_name {
-                    found_existing_attr = true;
+        while i < attrs_mut.len() {
+            if &attrs_mut[i].name.local == attr_name {
+                found_existing_attr = true;
 
-                    if let Some(attr_value) = attr_value.clone() {
-                        let _ = &attrs_mut[i].value.clear();
-                        let _ = &attrs_mut[i].value.push_slice(&attr_value.as_str());
-                    } else {
-                        // Remove attr completely if attr_value is not defined
-                        attrs_mut.remove(i);
-                        continue;
-                    }
+                if let Some(attr_value) = attr_value.clone() {
+                    let _ = &attrs_mut[i].value.clear();
+                    let _ = &attrs_mut[i].value.push_slice(attr_value.as_str());
+                } else {
+                    // Remove attr completely if attr_value is not defined
+                    attrs_mut.remove(i);
+                    continue;
                 }
-
-                i += 1;
             }
 
-            if !found_existing_attr {
-                // Add new attribute (since originally the target node didn't have it)
-                if let Some(attr_value) = attr_value.clone() {
-                    let name = LocalName::from(attr_name);
+            i += 1;
+        }
 
-                    attrs_mut.push(Attribute {
-                        name: QualName::new(None, ns!(), name),
-                        value: format_tendril!("{}", attr_value),
-                    });
-                }
+        if !found_existing_attr {
+            // Add new attribute (since originally the target node didn't have it)
+            if let Some(attr_value) = attr_value.clone() {
+                let name = LocalName::from(attr_name);
+
+                attrs_mut.push(Attribute {
+                    name: QualName::new(None, ns!(), name),
+                    value: format_tendril!("{}", attr_value),
+                });
             }
         }
-        _ => {}
     };
 }
 
-pub fn serialize_document(mut dom: RcDom, document_encoding: String, options: &Options) -> Vec<u8> {
+pub fn serialize_document(dom: RcDom, document_encoding: String, options: &Options) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
-    let document = dom.get_document();
 
     if options.isolate
         || options.no_css
@@ -552,21 +534,21 @@ pub fn serialize_document(mut dom: RcDom, document_encoding: String, options: &O
         || options.no_images
     {
         // Take care of CSP
-        if let Some(html) = get_child_node_by_name(&document, "html") {
+        if let Some(html) = get_child_node_by_name(&dom.document, "html") {
             if let Some(head) = get_child_node_by_name(&html, "head") {
-                let meta = dom.create_element(
-                    QualName::new(None, ns!(), local_name!("meta")),
+                let meta = create_element(
+                    &dom,
+                    QualName::new(None, ns!(), LocalName::from("meta")),
                     vec![
                         Attribute {
-                            name: QualName::new(None, ns!(), local_name!("http-equiv")),
+                            name: QualName::new(None, ns!(), LocalName::from("http-equiv")),
                             value: format_tendril!("Content-Security-Policy"),
                         },
                         Attribute {
-                            name: QualName::new(None, ns!(), local_name!("content")),
+                            name: QualName::new(None, ns!(), LocalName::from("content")),
                             value: format_tendril!("{}", compose_csp(options)),
                         },
                     ],
-                    Default::default(),
                 );
                 // The CSP meta-tag has to be prepended, never appended,
                 //  since there already may be one defined in the original document,
@@ -578,18 +560,15 @@ pub fn serialize_document(mut dom: RcDom, document_encoding: String, options: &O
         }
     }
 
-    serialize(
-        &mut buf,
-        &SerializableHandle::from(document.clone()),
-        SerializeOpts::default(),
-    )
-    .expect("Unable to serialize DOM into buffer");
+    let serializable: SerializableHandle = dom.document.into();
+    serialize(&mut buf, &serializable, SerializeOpts::default())
+        .expect("Unable to serialize DOM into buffer");
 
     // Unwrap NOSCRIPT elements
     if options.unwrap_noscript {
         let s: &str = &String::from_utf8_lossy(&buf);
         let noscript_re = Regex::new(r"<(?P<c>/?noscript[^>]*)>").unwrap();
-        buf = noscript_re.replace_all(&s, "<!--$c-->").as_bytes().to_vec();
+        buf = noscript_re.replace_all(s, "<!--$c-->").as_bytes().to_vec();
     }
 
     if !document_encoding.is_empty() {
@@ -604,27 +583,19 @@ pub fn serialize_document(mut dom: RcDom, document_encoding: String, options: &O
 }
 
 pub fn retrieve_and_embed_asset(
-    cache: &mut HashMap<String, Vec<u8>>,
+    cache: &mut Option<Cache>,
     client: &Client,
     document_url: &Url,
     node: &Handle,
     attr_name: &str,
     attr_value: &str,
     options: &Options,
-    depth: u32,
 ) {
     let resolved_url: Url = resolve_url(document_url, attr_value);
 
-    match retrieve_asset(
-        cache,
-        client,
-        &document_url.clone(),
-        &resolved_url,
-        options,
-        depth + 1,
-    ) {
-        Ok((data, final_url, mut media_type, charset)) => {
-            let node_name: &str = get_node_name(&node).unwrap();
+    match retrieve_asset(cache, client, &document_url.clone(), &resolved_url, options) {
+        Ok((data, final_url, media_type, charset)) => {
+            let node_name: &str = get_node_name(node).unwrap();
 
             // Check integrity if it's a LINK or SCRIPT element
             let mut ok_to_include: bool = true;
@@ -649,33 +620,25 @@ pub fn retrieve_and_embed_asset(
                     s = String::from_utf8_lossy(&data).to_string();
                 }
 
-                if node_name == "link" && determine_link_node_type(node) == "stylesheet" {
+                if node_name == "link"
+                    && parse_link_type(&get_node_attr(node, "rel").unwrap_or(String::from("")))
+                        .contains(&LinkType::Stylesheet)
+                {
                     // Stylesheet LINK elements require special treatment
-                    let css: String = embed_css(cache, client, &final_url, &s, options, depth + 1);
+                    let css: String = embed_css(cache, client, &final_url, &s, options);
 
                     // Create and embed data URL
                     let css_data_url =
                         create_data_url(&media_type, &charset, css.as_bytes(), &final_url);
-                    set_node_attr(&node, attr_name, Some(css_data_url.to_string()));
+                    set_node_attr(node, attr_name, Some(css_data_url.to_string()));
                 } else if node_name == "frame" || node_name == "iframe" {
                     // (I)FRAMEs are also quite different from conventional resources
                     let frame_dom = html_to_dom(&data, charset.clone());
-                    walk_and_embed_assets(
-                        cache,
-                        client,
-                        &final_url,
-                        &frame_dom.document,
-                        &options,
-                        depth + 1,
-                    );
+                    walk_and_embed_assets(cache, client, &final_url, &frame_dom.document, options);
 
                     let mut frame_data: Vec<u8> = Vec::new();
-                    serialize(
-                        &mut frame_data,
-                        &SerializableHandle::from(frame_dom.document.clone()),
-                        SerializeOpts::default(),
-                    )
-                    .unwrap();
+                    let serializable: SerializableHandle = frame_dom.document.into();
+                    serialize(&mut frame_data, &serializable, SerializeOpts::default()).unwrap();
 
                     // Create and embed data URL
                     let mut frame_data_url =
@@ -687,20 +650,45 @@ pub fn retrieve_and_embed_asset(
 
                     // Parse media type for SCRIPT elements
                     if node_name == "script" {
-                        if let Some(_) = get_node_attr(node, "src") {
-                            if let Some(script_node_type_attr_value) = get_node_attr(node, "type") {
-                                media_type = script_node_type_attr_value.to_string();
-                            } else {
-                                // Fallback to default one if it's not specified
-                                media_type = "application/javascript".to_string();
-                            }
-                        }
-                    }
+                        let script_media_type =
+                            get_node_attr(node, "type").unwrap_or(String::from("text/javascript"));
 
-                    // Create and embed data URL
-                    let mut data_url = create_data_url(&media_type, &charset, &data, &final_url);
-                    data_url.set_fragment(resolved_url.fragment());
-                    set_node_attr(node, attr_name, Some(data_url.to_string()));
+                        if script_media_type == "text/javascript"
+                            || script_media_type == "application/javascript"
+                        {
+                            // Embed javascript code instead of using data URLs
+                            let script_dom: RcDom =
+                                parse_document(RcDom::default(), Default::default())
+                                    .one("<script>;</script>");
+                            for script_node in
+                                find_nodes(&script_dom.document, vec!["html", "head", "script"])
+                                    .iter()
+                            {
+                                let text_node = &script_node.children.borrow()[0];
+
+                                if let NodeData::Text { ref contents } = text_node.data {
+                                    let mut tendril = contents.borrow_mut();
+                                    tendril.clear();
+                                    tendril.push_slice(&String::from_utf8_lossy(&data));
+                                }
+
+                                node.children.borrow_mut().push(text_node.clone());
+                                set_node_attr(node, attr_name, None);
+                            }
+                        } else {
+                            // Create and embed data URL
+                            let mut data_url =
+                                create_data_url(&script_media_type, &charset, &data, &final_url);
+                            data_url.set_fragment(resolved_url.fragment());
+                            set_node_attr(node, attr_name, Some(data_url.to_string()));
+                        }
+                    } else {
+                        // Create and embed data URL
+                        let mut data_url =
+                            create_data_url(&media_type, &charset, &data, &final_url);
+                        data_url.set_fragment(resolved_url.fragment());
+                        set_node_attr(node, attr_name, Some(data_url.to_string()));
+                    }
                 }
             }
         }
@@ -717,18 +705,17 @@ pub fn retrieve_and_embed_asset(
 }
 
 pub fn walk_and_embed_assets(
-    cache: &mut HashMap<String, Vec<u8>>,
+    cache: &mut Option<Cache>,
     client: &Client,
     document_url: &Url,
     node: &Handle,
     options: &Options,
-    depth: u32,
 ) {
     match node.data {
         NodeData::Document => {
             // Dig deeper
             for child in node.children.borrow().iter() {
-                walk_and_embed_assets(cache, client, &document_url, child, options, depth);
+                walk_and_embed_assets(cache, client, document_url, child, options);
             }
         }
         NodeData::Element {
@@ -744,61 +731,62 @@ pub fn walk_and_embed_assets(
                             || meta_attr_http_equiv_value.eq_ignore_ascii_case("location")
                         {
                             // Remove http-equiv attributes from META nodes if they're able to control the page
-                            set_node_attr(&node, "http-equiv", None);
+                            set_node_attr(node, "http-equiv", None);
                         }
                     }
                 }
                 "link" => {
-                    let link_type: &str = determine_link_node_type(node);
+                    let link_node_types: Vec<LinkType> =
+                        parse_link_type(&get_node_attr(node, "rel").unwrap_or(String::from("")));
 
-                    if link_type == "icon" {
+                    if link_node_types.contains(&LinkType::Favicon)
+                        || link_node_types.contains(&LinkType::AppleTouchIcon)
+                    {
                         // Find and resolve LINK's href attribute
                         if let Some(link_attr_href_value) = get_node_attr(node, "href") {
                             if !options.no_images && !link_attr_href_value.is_empty() {
                                 retrieve_and_embed_asset(
                                     cache,
                                     client,
-                                    &document_url,
+                                    document_url,
                                     node,
                                     "href",
                                     &link_attr_href_value,
                                     options,
-                                    depth,
                                 );
                             } else {
                                 set_node_attr(node, "href", None);
                             }
                         }
-                    } else if link_type == "stylesheet" {
+                    } else if link_node_types.contains(&LinkType::Stylesheet) {
                         // Resolve LINK's href attribute
                         if let Some(link_attr_href_value) = get_node_attr(node, "href") {
                             if options.no_css {
                                 set_node_attr(node, "href", None);
                                 // Wipe integrity attribute
                                 set_node_attr(node, "integrity", None);
-                            } else {
-                                if !link_attr_href_value.is_empty() {
-                                    retrieve_and_embed_asset(
-                                        cache,
-                                        client,
-                                        &document_url,
-                                        node,
-                                        "href",
-                                        &link_attr_href_value,
-                                        options,
-                                        depth,
-                                    );
-                                }
+                            } else if !link_attr_href_value.is_empty() {
+                                retrieve_and_embed_asset(
+                                    cache,
+                                    client,
+                                    document_url,
+                                    node,
+                                    "href",
+                                    &link_attr_href_value,
+                                    options,
+                                );
                             }
                         }
-                    } else if link_type == "preload" || link_type == "dns-prefetch" {
+                    } else if link_node_types.contains(&LinkType::Preload)
+                        || link_node_types.contains(&LinkType::DnsPrefetch)
+                    {
                         // Since all resources are embedded as data URLs, preloading and prefetching are not necessary
                         set_node_attr(node, "rel", None);
                     } else {
                         // Make sure that all other LINKs' href attributes are full URLs
                         if let Some(link_attr_href_value) = get_node_attr(node, "href") {
                             let href_full_url: Url =
-                                resolve_url(&document_url, &link_attr_href_value);
+                                resolve_url(document_url, &link_attr_href_value);
                             set_node_attr(node, "href", Some(href_full_url.to_string()));
                         }
                     }
@@ -828,7 +816,6 @@ pub fn walk_and_embed_assets(
                                 "background",
                                 &body_attr_background_value,
                                 options,
-                                depth,
                             );
                         }
                     }
@@ -840,63 +827,49 @@ pub fn walk_and_embed_assets(
 
                     if options.no_images {
                         // Put empty images into src and data-src attributes
-                        if img_attr_src_value != None {
+                        if img_attr_src_value.is_some() {
                             set_node_attr(node, "src", Some(EMPTY_IMAGE_DATA_URL.to_string()));
                         }
-                        if img_attr_data_src_value != None {
+                        if img_attr_data_src_value.is_some() {
                             set_node_attr(node, "data-src", Some(EMPTY_IMAGE_DATA_URL.to_string()));
                         }
+                    } else if img_attr_src_value.clone().unwrap_or_default().is_empty()
+                        && img_attr_data_src_value
+                            .clone()
+                            .unwrap_or_default()
+                            .is_empty()
+                    {
+                        // Add empty src attribute
+                        set_node_attr(node, "src", Some("".to_string()));
                     } else {
-                        if img_attr_src_value.clone().unwrap_or_default().is_empty()
-                            && img_attr_data_src_value
-                                .clone()
-                                .unwrap_or_default()
-                                .is_empty()
+                        // Add data URL src attribute
+                        let img_full_url: String = if !img_attr_data_src_value
+                            .clone()
+                            .unwrap_or_default()
+                            .is_empty()
                         {
-                            // Add empty src attribute
-                            set_node_attr(node, "src", Some("".to_string()));
+                            img_attr_data_src_value.unwrap_or_default()
                         } else {
-                            // Add data URL src attribute
-                            let img_full_url: String = if !img_attr_data_src_value
-                                .clone()
-                                .unwrap_or_default()
-                                .is_empty()
-                            {
-                                img_attr_data_src_value.unwrap_or_default()
-                            } else {
-                                img_attr_src_value.unwrap_or_default()
-                            };
-                            retrieve_and_embed_asset(
-                                cache,
-                                client,
-                                document_url,
-                                node,
-                                "src",
-                                &img_full_url,
-                                options,
-                                depth,
-                            );
-                        }
+                            img_attr_src_value.unwrap_or_default()
+                        };
+                        retrieve_and_embed_asset(
+                            cache,
+                            client,
+                            document_url,
+                            node,
+                            "src",
+                            &img_full_url,
+                            options,
+                        );
                     }
 
                     // Resolve srcset attribute
                     if let Some(img_srcset) = get_node_attr(node, "srcset") {
                         if !img_srcset.is_empty() {
-                            let resolved_srcset: String = embed_srcset(
-                                cache,
-                                client,
-                                &document_url,
-                                &img_srcset,
-                                options,
-                                depth,
-                            );
+                            let resolved_srcset: String =
+                                embed_srcset(cache, client, document_url, &img_srcset, options);
                             set_node_attr(node, "srcset", Some(resolved_srcset));
                         }
-                    }
-                }
-                "svg" => {
-                    if options.no_images {
-                        node.children.borrow_mut().clear();
                     }
                 }
                 "input" => {
@@ -919,41 +892,158 @@ pub fn walk_and_embed_assets(
                                         "src",
                                         &input_attr_src_value,
                                         options,
-                                        depth,
                                     );
                                 }
                             }
                         }
                     }
                 }
+                "svg" => {
+                    if options.no_images {
+                        // Remove all children
+                        node.children.borrow_mut().clear();
+                    }
+                }
                 "image" => {
-                    let mut image_href: String = "".to_string();
+                    let attr_names: [&str; 2] = ["href", "xlink:href"];
 
-                    if let Some(image_attr_href_value) = get_node_attr(node, "href") {
-                        image_href = image_attr_href_value;
-                        if options.no_images {
-                            set_node_attr(node, "href", None);
+                    for attr_name in attr_names.into_iter() {
+                        if let Some(image_attr_href_value) = get_node_attr(node, attr_name) {
+                            if options.no_images {
+                                set_node_attr(node, attr_name, None);
+                            } else {
+                                retrieve_and_embed_asset(
+                                    cache,
+                                    client,
+                                    document_url,
+                                    node,
+                                    attr_name,
+                                    &image_attr_href_value,
+                                    options,
+                                );
+                            }
                         }
                     }
+                }
+                "use" => {
+                    let attr_names: [&str; 2] = ["href", "xlink:href"];
 
-                    if let Some(image_attr_xlink_href_value) = get_node_attr(node, "xlink:href") {
-                        image_href = image_attr_xlink_href_value;
-                        if options.no_images {
-                            set_node_attr(node, "xlink:href", None);
+                    for attr_name in attr_names.into_iter() {
+                        if let Some(use_attr_href_value) = get_node_attr(node, attr_name) {
+                            if options.no_images {
+                                set_node_attr(node, attr_name, None);
+                            } else {
+                                let image_asset_url: Url =
+                                    resolve_url(document_url, &use_attr_href_value);
+
+                                match retrieve_asset(
+                                    cache,
+                                    client,
+                                    document_url,
+                                    &image_asset_url,
+                                    options,
+                                ) {
+                                    Ok((data, final_url, media_type, charset)) => {
+                                        if media_type == "image/svg+xml" {
+                                            // Parse SVG
+                                            let svg_dom: RcDom = parse_document(
+                                                RcDom::default(),
+                                                Default::default(),
+                                            )
+                                            .from_utf8()
+                                            .read_from(&mut data.as_slice())
+                                            .unwrap();
+
+                                            if image_asset_url.fragment().is_some() {
+                                                // Take only that one #fragment symbol from SVG and replace this image|use with that node
+                                                let single_symbol_node = create_element(
+                                                    &svg_dom,
+                                                    QualName::new(
+                                                        None,
+                                                        ns!(),
+                                                        LocalName::from("symbol"),
+                                                    ),
+                                                    vec![],
+                                                );
+                                                for symbol_node in find_nodes(
+                                                    &svg_dom.document,
+                                                    vec!["html", "body", "svg", "defs", "symbol"],
+                                                )
+                                                .iter()
+                                                {
+                                                    if get_node_attr(symbol_node, "id")
+                                                        .unwrap_or_default()
+                                                        == image_asset_url.fragment().unwrap()
+                                                    {
+                                                        svg_dom.reparent_children(
+                                                            symbol_node,
+                                                            &single_symbol_node,
+                                                        );
+                                                        set_node_attr(
+                                                            &single_symbol_node,
+                                                            "id",
+                                                            Some(
+                                                                image_asset_url
+                                                                    .fragment()
+                                                                    .unwrap()
+                                                                    .to_string(),
+                                                            ),
+                                                        );
+
+                                                        set_node_attr(
+                                                            node,
+                                                            attr_name,
+                                                            Some(format!(
+                                                                "#{}",
+                                                                image_asset_url.fragment().unwrap()
+                                                            )),
+                                                        );
+
+                                                        break;
+                                                    }
+                                                }
+
+                                                node.children
+                                                    .borrow_mut()
+                                                    .push(single_symbol_node.clone());
+                                            } else {
+                                                // Replace this image|use with whole DOM of that SVG file
+                                                for svg_node in find_nodes(
+                                                    &svg_dom.document,
+                                                    vec!["html", "body", "svg"],
+                                                )
+                                                .iter()
+                                                {
+                                                    svg_dom.reparent_children(svg_node, node);
+                                                    break;
+                                                }
+                                                // TODO: decide if we resort to using data URL here or stick with embedding the DOM
+                                            }
+                                        } else {
+                                            // It's likely a raster image; embed it as data URL
+                                            let image_asset_data: Url = create_data_url(
+                                                &media_type,
+                                                &charset,
+                                                &data,
+                                                &final_url,
+                                            );
+                                            set_node_attr(
+                                                node,
+                                                attr_name,
+                                                Some(image_asset_data.to_string()),
+                                            );
+                                        }
+                                    }
+                                    Err(_) => {
+                                        set_node_attr(
+                                            node,
+                                            attr_name,
+                                            Some(image_asset_url.to_string()),
+                                        );
+                                    }
+                                }
+                            }
                         }
-                    }
-
-                    if !options.no_images && !image_href.is_empty() {
-                        retrieve_and_embed_asset(
-                            cache,
-                            client,
-                            document_url,
-                            node,
-                            "href",
-                            &image_href,
-                            options,
-                            depth,
-                        );
                     }
                 }
                 "source" => {
@@ -973,7 +1063,6 @@ pub fn walk_and_embed_assets(
                                     "src",
                                     &source_attr_src_value,
                                     options,
-                                    depth,
                                 );
                             }
                         } else if parent_node_name == "video" {
@@ -988,32 +1077,28 @@ pub fn walk_and_embed_assets(
                                     "src",
                                     &source_attr_src_value,
                                     options,
-                                    depth,
                                 );
                             }
                         }
                     }
 
                     if let Some(source_attr_srcset_value) = get_node_attr(node, "srcset") {
-                        if parent_node_name == "picture" {
-                            if !source_attr_srcset_value.is_empty() {
-                                if options.no_images {
-                                    set_node_attr(
-                                        node,
-                                        "srcset",
-                                        Some(EMPTY_IMAGE_DATA_URL.to_string()),
-                                    );
-                                } else {
-                                    let resolved_srcset: String = embed_srcset(
-                                        cache,
-                                        client,
-                                        &document_url,
-                                        &source_attr_srcset_value,
-                                        options,
-                                        depth,
-                                    );
-                                    set_node_attr(node, "srcset", Some(resolved_srcset));
-                                }
+                        if parent_node_name == "picture" && !source_attr_srcset_value.is_empty() {
+                            if options.no_images {
+                                set_node_attr(
+                                    node,
+                                    "srcset",
+                                    Some(EMPTY_IMAGE_DATA_URL.to_string()),
+                                );
+                            } else {
+                                let resolved_srcset: String = embed_srcset(
+                                    cache,
+                                    client,
+                                    document_url,
+                                    &source_attr_srcset_value,
+                                    options,
+                                );
+                                set_node_attr(node, "srcset", Some(resolved_srcset));
                             }
                         }
                     }
@@ -1043,27 +1128,26 @@ pub fn walk_and_embed_assets(
                 }
                 "script" => {
                     // Read values of integrity and src attributes
-                    let script_attr_src: Option<String> = get_node_attr(node, "src");
+                    let script_attr_src: &str = &get_node_attr(node, "src").unwrap_or_default();
 
                     if options.no_js {
                         // Empty inner content
                         node.children.borrow_mut().clear();
                         // Remove src attribute
-                        if script_attr_src != None {
+                        if !script_attr_src.is_empty() {
                             set_node_attr(node, "src", None);
                             // Wipe integrity attribute
                             set_node_attr(node, "integrity", None);
                         }
-                    } else if !script_attr_src.clone().unwrap_or_default().is_empty() {
+                    } else if !script_attr_src.is_empty() {
                         retrieve_and_embed_asset(
                             cache,
                             client,
                             document_url,
                             node,
                             "src",
-                            &script_attr_src.unwrap_or_default(),
+                            script_attr_src,
                             options,
-                            depth,
                         );
                     }
                 }
@@ -1078,10 +1162,9 @@ pub fn walk_and_embed_assets(
                                 let replacement = embed_css(
                                     cache,
                                     client,
-                                    &document_url,
+                                    document_url,
                                     tendril.as_ref(),
                                     options,
-                                    depth,
                                 );
                                 tendril.clear();
                                 tendril.push_slice(&replacement);
@@ -1108,12 +1191,11 @@ pub fn walk_and_embed_assets(
                                 retrieve_and_embed_asset(
                                     cache,
                                     client,
-                                    &document_url,
+                                    document_url,
                                     node,
                                     "src",
                                     &frame_attr_src_value,
                                     options,
-                                    depth,
                                 );
                             }
                         }
@@ -1133,7 +1215,6 @@ pub fn walk_and_embed_assets(
                                 "src",
                                 &audio_attr_src_value,
                                 options,
-                                depth,
                             );
                         }
                     }
@@ -1152,7 +1233,6 @@ pub fn walk_and_embed_assets(
                                 "src",
                                 &video_attr_src_value,
                                 options,
-                                depth,
                             );
                         }
                     }
@@ -1176,7 +1256,6 @@ pub fn walk_and_embed_assets(
                                     "poster",
                                     &video_attr_poster_value,
                                     options,
-                                    depth,
                                 );
                             }
                         }
@@ -1184,44 +1263,35 @@ pub fn walk_and_embed_assets(
                 }
                 "noscript" => {
                     for child_node in node.children.borrow_mut().iter_mut() {
-                        match child_node.data {
-                            NodeData::Text { ref contents } => {
-                                // Get contents of NOSCRIPT node
-                                let mut noscript_contents = contents.borrow_mut();
-                                // Parse contents of NOSCRIPT node as DOM
-                                let noscript_contents_dom: RcDom = html_to_dom(
-                                    &noscript_contents.as_bytes().to_vec(),
-                                    "".to_string(),
-                                );
-                                // Embed assets of NOSCRIPT node contents
-                                walk_and_embed_assets(
-                                    cache,
-                                    client,
-                                    &document_url,
-                                    &noscript_contents_dom.document,
-                                    &options,
-                                    depth,
-                                );
-                                // Get rid of original contents
-                                noscript_contents.clear();
-                                // Insert HTML containing embedded assets into NOSCRIPT node
-                                if let Some(html) =
-                                    get_child_node_by_name(&noscript_contents_dom.document, "html")
-                                {
-                                    if let Some(body) = get_child_node_by_name(&html, "body") {
-                                        let mut buf: Vec<u8> = Vec::new();
-                                        serialize(
-                                            &mut buf,
-                                            &SerializableHandle::from(body.clone()),
-                                            SerializeOpts::default(),
-                                        )
+                        if let NodeData::Text { ref contents } = child_node.data {
+                            // Get contents of NOSCRIPT node
+                            let mut noscript_contents = contents.borrow_mut();
+                            // Parse contents of NOSCRIPT node as DOM
+                            let noscript_contents_dom: RcDom =
+                                html_to_dom(&noscript_contents.as_bytes().to_vec(), "".to_string());
+                            // Embed assets of NOSCRIPT node contents
+                            walk_and_embed_assets(
+                                cache,
+                                client,
+                                document_url,
+                                &noscript_contents_dom.document,
+                                options,
+                            );
+                            // Get rid of original contents
+                            noscript_contents.clear();
+                            // Insert HTML containing embedded assets into NOSCRIPT node
+                            if let Some(html) =
+                                get_child_node_by_name(&noscript_contents_dom.document, "html")
+                            {
+                                if let Some(body) = get_child_node_by_name(&html, "body") {
+                                    let mut buf: Vec<u8> = Vec::new();
+                                    let serializable: SerializableHandle = body.into();
+                                    serialize(&mut buf, &serializable, SerializeOpts::default())
                                         .expect("Unable to serialize DOM into buffer");
-                                        let result = String::from_utf8_lossy(&buf);
-                                        noscript_contents.push_slice(&result);
-                                    }
+                                    let result = String::from_utf8_lossy(&buf);
+                                    noscript_contents.push_slice(&result);
                                 }
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -1235,14 +1305,8 @@ pub fn walk_and_embed_assets(
             } else {
                 // Embed URLs found within the style attribute of this node
                 if let Some(node_attr_style_value) = get_node_attr(node, "style") {
-                    let embedded_style = embed_css(
-                        cache,
-                        client,
-                        &document_url,
-                        &node_attr_style_value,
-                        options,
-                        depth,
-                    );
+                    let embedded_style =
+                        embed_css(cache, client, document_url, &node_attr_style_value, options);
                     set_node_attr(node, "style", Some(embedded_style));
                 }
             }
@@ -1265,7 +1329,7 @@ pub fn walk_and_embed_assets(
 
             // Dig deeper
             for child in node.children.borrow().iter() {
-                walk_and_embed_assets(cache, client, &document_url, child, options, depth);
+                walk_and_embed_assets(cache, client, document_url, child, options);
             }
         }
         _ => {

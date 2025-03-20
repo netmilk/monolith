@@ -38,13 +38,12 @@ mod passing {
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
             format!(
-                "\
-                {file}{cwd}/tests/_data_/basic/local-file.html\n \
-                {file}{cwd}/tests/_data_/basic/local-style.css\n \
-                {file}{cwd}/tests/_data_/basic/local-style-does-not-exist.css (not found)\n \
-                {file}{cwd}/tests/_data_/basic/monolith.png (not found)\n \
-                {file}{cwd}/tests/_data_/basic/local-script.js\n\
-                ",
+                r#"{file}{cwd}/tests/_data_/basic/local-file.html
+{file}{cwd}/tests/_data_/basic/local-style.css
+{file}{cwd}/tests/_data_/basic/local-style-does-not-exist.css (file not found)
+{file}{cwd}/tests/_data_/basic/monolith.png (file not found)
+{file}{cwd}/tests/_data_/basic/local-script.js
+"#,
                 file = file_url_protocol,
                 cwd = cwd_normalized
             )
@@ -53,18 +52,25 @@ mod passing {
         // STDOUT should contain HTML from the local file
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "\
-            <!DOCTYPE html><html lang=\"en\"><head>\n  \
-            <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">\n  \
-            <title>Local HTML file</title>\n  \
-            <link href=\"data:text/css;base64,Ym9keSB7CiAgICBiYWNrZ3JvdW5kLWNvbG9yOiAjMDAwOwogICAgY29sb3I6ICNmZmY7Cn0K\" rel=\"stylesheet\" type=\"text/css\">\n  \
-            <link rel=\"stylesheet\" type=\"text/css\">\n</head>\n\n<body>\n  \
-            <img alt=\"\">\n  \
-            <a href=\"file://local-file.html/\">Tricky href</a>\n  \
-            <a href=\"https://github.com/Y2Z/monolith\">Remote URL</a>\n  \
-            <script src=\"data:application/javascript;base64,ZG9jdW1lbnQuYm9keS5zdHlsZS5iYWNrZ3JvdW5kQ29sb3IgPSAiZ3JlZW4iOwpkb2N1bWVudC5ib2R5LnN0eWxlLmNvbG9yID0gInJlZCI7Cg==\"></script>\n\n\n\n\
-            </body></html>\n\
-            "
+            r##"<!DOCTYPE html><html lang="en"><head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <title>Local HTML file</title>
+  <link href="data:text/css;base64,Ym9keSB7CiAgICBiYWNrZ3JvdW5kLWNvbG9yOiAjMDAwOwogICAgY29sb3I6ICNmZmY7Cn0K" rel="stylesheet" type="text/css">
+  <link rel="stylesheet" type="text/css">
+</head>
+
+<body>
+  <img alt="">
+  <a href="file://local-file.html/">Tricky href</a>
+  <a href="https://github.com/Y2Z/monolith">Remote URL</a>
+  <script>document.body.style.backgroundColor = "green";
+document.body.style.color = "red";
+</script>
+
+
+
+</body></html>
+"##
         );
 
         // Exit code should be 0
@@ -88,7 +94,7 @@ mod passing {
             String::from_utf8_lossy(&out.stderr),
             format!(
                 "{file_url_html}\n",
-                file_url_html = Url::from_file_path(fs::canonicalize(&path_html).unwrap()).unwrap(),
+                file_url_html = Url::from_file_path(fs::canonicalize(path_html).unwrap()).unwrap(),
             )
         );
 
@@ -96,19 +102,23 @@ mod passing {
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             format!(
-                "\
-                <!DOCTYPE html><html lang=\"en\"><head>\
-                <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'unsafe-eval' 'unsafe-inline' data:; style-src 'none'; script-src 'none'; img-src data:;\"></meta>\n  \
-                <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">\n  \
-                <title>Local HTML file</title>\n  \
-                <link rel=\"stylesheet\" type=\"text/css\">\n  \
-                <link rel=\"stylesheet\" type=\"text/css\">\n</head>\n\n<body>\n  \
-                <img src=\"{empty_image}\" alt=\"\">\n  \
-                <a href=\"file://local-file.html/\">Tricky href</a>\n  \
-                <a href=\"https://github.com/Y2Z/monolith\">Remote URL</a>\n  \
-                <script></script>\n\n\n\n\
-                </body></html>\n\
-                ",
+                r##"<!DOCTYPE html><html lang="en"><head><meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-eval' 'unsafe-inline' data:; style-src 'none'; script-src 'none'; img-src data:;"></meta>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <title>Local HTML file</title>
+  <link rel="stylesheet" type="text/css">
+  <link rel="stylesheet" type="text/css">
+</head>
+
+<body>
+  <img src="{empty_image}" alt="">
+  <a href="file://local-file.html/">Tricky href</a>
+  <a href="https://github.com/Y2Z/monolith">Remote URL</a>
+  <script></script>
+
+
+
+</body></html>
+"##,
                 empty_image = EMPTY_IMAGE_DATA_URL
             )
         );
@@ -151,19 +161,23 @@ mod passing {
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             format!(
-                "\
-                <!DOCTYPE html><html lang=\"en\"><head>\
-                <meta http-equiv=\"Content-Security-Policy\" content=\"style-src 'none'; script-src 'none'; img-src data:;\"></meta>\n  \
-                <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">\n  \
-                <title>Local HTML file</title>\n  \
-                <link rel=\"stylesheet\" type=\"text/css\">\n  \
-                <link rel=\"stylesheet\" type=\"text/css\">\n</head>\n\n<body>\n  \
-                <img src=\"{empty_image}\" alt=\"\">\n  \
-                <a href=\"file://local-file.html/\">Tricky href</a>\n  \
-                <a href=\"https://github.com/Y2Z/monolith\">Remote URL</a>\n  \
-                <script></script>\n\n\n\n\
-                </body></html>\n\
-                ",
+                r##"<!DOCTYPE html><html lang="en"><head><meta http-equiv="Content-Security-Policy" content="style-src 'none'; script-src 'none'; img-src data:;"></meta>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <title>Local HTML file</title>
+  <link rel="stylesheet" type="text/css">
+  <link rel="stylesheet" type="text/css">
+</head>
+
+<body>
+  <img src="{empty_image}" alt="">
+  <a href="file://local-file.html/">Tricky href</a>
+  <a href="https://github.com/Y2Z/monolith">Remote URL</a>
+  <script></script>
+
+
+
+</body></html>
+"##,
                 empty_image = EMPTY_IMAGE_DATA_URL
             )
         );
@@ -184,19 +198,99 @@ mod passing {
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
             format!(
-                "\
-                {file_url_html}\n \
-                {file_url_svg}\n\
-                ",
-                file_url_html = Url::from_file_path(fs::canonicalize(&path_html).unwrap()).unwrap(),
-                file_url_svg = Url::from_file_path(fs::canonicalize(&path_svg).unwrap()).unwrap(),
+                r#"{file_url_html}
+{file_url_svg}
+"#,
+                file_url_html = Url::from_file_path(fs::canonicalize(path_html).unwrap()).unwrap(),
+                file_url_svg = Url::from_file_path(fs::canonicalize(path_svg).unwrap()).unwrap(),
             )
         );
 
         // STDOUT should contain HTML with date URL for background-image in it
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "<html><head></head><body><div style=\"background-image: url(&quot;data:image/svg+xml;base64,PHN2ZyB2ZXJzaW9uPSIxLjEiIGJhc2VQcm9maWxlPSJmdWxsIiB3aWR0aD0iMzAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9InJlZCIgLz4KICAgIDxjaXJjbGUgY3g9IjE1MCIgY3k9IjEwMCIgcj0iODAiIGZpbGw9ImdyZWVuIiAvPgogICAgPHRleHQgeD0iMTUwIiB5PSIxMjUiIGZvbnQtc2l6ZT0iNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IndoaXRlIj5TVkc8L3RleHQ+Cjwvc3ZnPgo=&quot;)\"></div>\n</body></html>\n"
+            r##"<html><head></head><body><div style="background-image: url(&quot;data:image/svg+xml;base64,PHN2ZyB2ZXJzaW9uPSIxLjEiIGJhc2VQcm9maWxlPSJmdWxsIiB3aWR0aD0iMzAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9InJlZCIgLz4KICAgIDxjaXJjbGUgY3g9IjE1MCIgY3k9IjEwMCIgcj0iODAiIGZpbGw9ImdyZWVuIiAvPgogICAgPHRleHQgeD0iMTUwIiB5PSIxMjUiIGZvbnQtc2l6ZT0iNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IndoaXRlIj5TVkc8L3RleHQ+Cjwvc3ZnPgo=&quot;)"></div>
+</body></html>
+"##
+        );
+
+        // Exit code should be 0
+        out.assert().code(0);
+    }
+
+    #[test]
+    fn embed_svg_local_asset_via_use() {
+        let mut cmd = Command::cargo_bin(env!("CARGO_PKG_NAME")).unwrap();
+        let path_html: &Path = Path::new("tests/_data_/svg/svg.html");
+        let path_svg: &Path = Path::new("tests/_data_/svg/icons.svg");
+
+        let out = cmd.arg("-M").arg(path_html.as_os_str()).output().unwrap();
+
+        // STDERR should list files that got retrieved
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                r#"{file_url_html}
+{file_url_svg}
+"#,
+                file_url_html = Url::from_file_path(fs::canonicalize(path_html).unwrap()).unwrap(),
+                file_url_svg = Url::from_file_path(fs::canonicalize(path_svg).unwrap()).unwrap(),
+            )
+        );
+
+        // STDOUT should contain HTML with one symbol extracted from SVG file
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            r##"<html><head></head><body>
+<button class="tm-votes-lever__button" data-test-id="votes-lever-upvote-button" title="Like" type="button">
+  <svg class="tm-svg-img tm-votes-lever__icon" height="24" width="24">
+    <title>Like</title>
+    <use xlink:href="#icon-1"><symbol id="icon-1">
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M10 20h4V10h3l-5-6.5L7 10h3v10Z"></path>
+    </symbol></use>
+  </svg>
+</button>
+
+
+</body></html>
+"##
+        );
+
+        // Exit code should be 0
+        out.assert().code(0);
+    }
+
+    #[test]
+    fn embed_svg_local_asset_via_image() {
+        let mut cmd = Command::cargo_bin(env!("CARGO_PKG_NAME")).unwrap();
+        let path_html: &Path = Path::new("tests/_data_/svg/image.html");
+        let path_svg: &Path = Path::new("tests/_data_/svg/image.svg");
+
+        let out = cmd.arg("-M").arg(path_html.as_os_str()).output().unwrap();
+
+        // STDERR should list files that got retrieved
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                r#"{file_url_html}
+{file_url_svg}
+"#,
+                file_url_html = Url::from_file_path(fs::canonicalize(path_html).unwrap()).unwrap(),
+                file_url_svg = Url::from_file_path(fs::canonicalize(path_svg).unwrap()).unwrap(),
+            )
+        );
+
+        // STDOUT should contain HTML with data URL of SVG file
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            r##"<html><head></head><body>
+        <svg height="24" width="24">
+            <image href="data:image/svg+xml;base64,PHN2ZyB2ZXJzaW9uPSIxLjEiIGJhc2VQcm9maWxlPSJmdWxsIiB3aWR0aD0iMzAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9InJlZCIgLz4KICAgIDxjaXJjbGUgY3g9IjE1MCIgY3k9IjEwMCIgcj0iODAiIGZpbGw9ImdyZWVuIiAvPgogICAgPHRleHQgeD0iMTUwIiB5PSIxMjUiIGZvbnQtc2l6ZT0iNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IndoaXRlIj5TVkc8L3RleHQ+Cjwvc3ZnPgo=" width="24" height="24">
+        </image></svg>
+    
+
+</body></html>
+"##
         );
 
         // Exit code should be 0
@@ -235,13 +329,12 @@ mod passing {
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
             format!(
-                "\
-                {file}{cwd}/tests/_data_/integrity/index.html\n \
-                {file}{cwd}/tests/_data_/integrity/style.css\n \
-                {file}{cwd}/tests/_data_/integrity/style.css\n \
-                {file}{cwd}/tests/_data_/integrity/script.js\n \
-                {file}{cwd}/tests/_data_/integrity/script.js\n\
-                ",
+                r#"{file}{cwd}/tests/_data_/integrity/index.html
+{file}{cwd}/tests/_data_/integrity/style.css
+{file}{cwd}/tests/_data_/integrity/style.css
+{file}{cwd}/tests/_data_/integrity/script.js
+{file}{cwd}/tests/_data_/integrity/script.js
+"#,
                 file = file_url_protocol,
                 cwd = cwd_normalized,
             )
@@ -251,17 +344,24 @@ mod passing {
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             format!(
-                "\
-                <!DOCTYPE html><html lang=\"en\"><head>\
-                <meta http-equiv=\"Content-Security-Policy\" content=\"img-src data:;\"></meta>\n  \
-                <title>Local HTML file</title>\n  \
-                <link href=\"data:text/css;base64,Ym9keSB7CiAgICBiYWNrZ3JvdW5kLWNvbG9yOiAjMDAwOwogICAgY29sb3I6ICNGRkY7Cn0K\" rel=\"stylesheet\" type=\"text/css\" crossorigin=\"anonymous\">\n  \
-                <link href=\"style.css\" rel=\"stylesheet\" type=\"text/css\" crossorigin=\"anonymous\">\n</head>\n\n<body>\n  \
-                <p>This page should have black background and white foreground, but only when served via http: (not via file:)</p>\n  \
-                <script src=\"data:application/javascript;base64,ZnVuY3Rpb24gbm9vcCgpIHsKICAgIGNvbnNvbGUubG9nKCJtb25vbGl0aCIpOwp9Cg==\"></script>\n  \
-                <script src=\"script.js\"></script>\n\n\n\n\
-                </body></html>\n\
-                "
+                r##"<!DOCTYPE html><html lang="en"><head><meta http-equiv="Content-Security-Policy" content="img-src data:;"></meta>
+  <title>Local HTML file</title>
+  <link href="data:text/css;base64,Ym9keSB7CiAgICBiYWNrZ3JvdW5kLWNvbG9yOiAjMDAwOwogICAgY29sb3I6ICNGRkY7Cn0K" rel="stylesheet" type="text/css" crossorigin="anonymous">
+  <link href="style.css" rel="stylesheet" type="text/css" crossorigin="anonymous">
+</head>
+
+<body>
+  <p>This page should have black background and white foreground, but only when served via http: (not via file:)</p>
+  <script>function noop() {{
+    console.log("monolith");
+}}
+</script>
+  <script src="script.js"></script>
+
+
+
+</body></html>
+"##
             )
         );
 

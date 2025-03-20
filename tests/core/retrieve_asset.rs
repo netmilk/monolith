@@ -9,16 +9,15 @@
 mod passing {
     use reqwest::blocking::Client;
     use reqwest::Url;
-    use std::collections::HashMap;
     use std::env;
 
-    use monolith::opts::Options;
+    use monolith::cache::Cache;
+    use monolith::core::{retrieve_asset, Options};
     use monolith::url;
-    use monolith::utils;
 
     #[test]
     fn read_data_url() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
 
         let mut options = Options::default();
@@ -26,13 +25,12 @@ mod passing {
 
         // If both source and target are data URLs,
         //  ensure the result contains target data URL
-        let (data, final_url, media_type, charset) = utils::retrieve_asset(
+        let (data, final_url, media_type, charset) = retrieve_asset(
             cache,
             &client,
             &Url::parse("data:text/html;base64,c291cmNl").unwrap(),
             &Url::parse("data:text/html;base64,dGFyZ2V0").unwrap(),
             &options,
-            0,
         )
         .unwrap();
         assert_eq!(&media_type, "text/html");
@@ -49,7 +47,7 @@ mod passing {
 
     #[test]
     fn read_local_file_with_file_url_parent() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
 
         let mut options = Options::default();
@@ -59,7 +57,7 @@ mod passing {
 
         // Inclusion of local assets from local sources should be allowed
         let cwd = env::current_dir().unwrap();
-        let (data, final_url, media_type, charset) = utils::retrieve_asset(
+        let (data, final_url, media_type, charset) = retrieve_asset(
             cache,
             &client,
             &Url::parse(&format!(
@@ -75,12 +73,15 @@ mod passing {
             ))
             .unwrap(),
             &options,
-            0,
         )
         .unwrap();
-        assert_eq!(&media_type, "application/javascript");
+        assert_eq!(&media_type, "text/javascript");
         assert_eq!(&charset, "");
-        assert_eq!(url::create_data_url(&media_type, &charset, &data, &final_url), Url::parse("data:application/javascript;base64,ZG9jdW1lbnQuYm9keS5zdHlsZS5iYWNrZ3JvdW5kQ29sb3IgPSAiZ3JlZW4iOwpkb2N1bWVudC5ib2R5LnN0eWxlLmNvbG9yID0gInJlZCI7Cg==").unwrap());
+        let data_url = "data:text/javascript;base64,ZG9jdW1lbnQuYm9keS5zdHlsZS5iYWNrZ3JvdW5kQ29sb3IgPSAiZ3JlZW4iOwpkb2N1bWVudC5ib2R5LnN0eWxlLmNvbG9yID0gInJlZCI7Cg==";
+        assert_eq!(
+            url::create_data_url(&media_type, &charset, &data, &final_url),
+            Url::parse(data_url).unwrap()
+        );
         assert_eq!(
             final_url,
             Url::parse(&format!(
@@ -104,27 +105,25 @@ mod passing {
 mod failing {
     use reqwest::blocking::Client;
     use reqwest::Url;
-    use std::collections::HashMap;
 
-    use monolith::opts::Options;
-    use monolith::utils;
+    use monolith::cache::Cache;
+    use monolith::core::{retrieve_asset, Options};
 
     #[test]
     fn read_local_file_with_data_url_parent() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
 
         let mut options = Options::default();
         options.silent = true;
 
         // Inclusion of local assets from data URL sources should not be allowed
-        match utils::retrieve_asset(
+        match retrieve_asset(
             cache,
             &client,
             &Url::parse("data:text/html;base64,SoUrCe").unwrap(),
             &Url::parse("file:///etc/passwd").unwrap(),
             &options,
-            0,
         ) {
             Ok((..)) => {
                 assert!(false);
@@ -137,20 +136,19 @@ mod failing {
 
     #[test]
     fn read_local_file_with_https_parent() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
 
         let mut options = Options::default();
         options.silent = true;
 
         // Inclusion of local assets from remote sources should not be allowed
-        match utils::retrieve_asset(
+        match retrieve_asset(
             cache,
             &client,
             &Url::parse("https://kernel.org/").unwrap(),
             &Url::parse("file:///etc/passwd").unwrap(),
             &options,
-            0,
         ) {
             Ok((..)) => {
                 assert!(false);

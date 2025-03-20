@@ -55,7 +55,7 @@ scoop install main/monolith
 #### Via [Winget](https://winstall.app/apps/Y2Z.Monolith) (Windows)
 
 ```console
-winget install --id=Y2Z.Monolith  -e
+winget install --id=Y2Z.Monolith -e
 ```
 
 #### Via [MacPorts](https://ports.macports.org/port/monolith/summary) (macOS)
@@ -82,10 +82,16 @@ guix install monolith
 nix-env -iA nixpkgs.monolith
 ```
 
-#### Using [AUR](https://aur.archlinux.org/packages/monolith) (Arch Linux)
+#### Using [Flox](https://flox.dev)
 
 ```console
-yay monolith
+flox install monolith
+```
+
+#### Using [Pacman](https://archlinux.org/packages/extra/x86_64/monolith) (Arch Linux)
+
+```console
+pacman -S monolith
 ```
 
 #### Using [aports](https://pkgs.alpinelinux.org/packages?name=monolith) (Alpine Linux)
@@ -197,10 +203,11 @@ cat some-site-page.html | monolith -aIiFfcMv -b https://some.site/ - > some-site
  - `-M`: Don't add timestamp and URL information
  - `-n`: Extract contents of NOSCRIPT elements
  - `-o`: Write output to `file` (use “-” for STDOUT)
- - `-s`: Be quiet
+ - `-q`: Be quiet
  - `-t`: Adjust `network request timeout`
  - `-u`: Provide `custom User-Agent`
  - `-v`: Exclude videos
+ - `-V`: Print version number
 
 
 ---------------------------------------------------
@@ -228,7 +235,7 @@ Monolith doesn't feature a JavaScript engine, hence websites that retrieve and d
 For example, Chromium (Chrome) can be used to act as a pre-processor for such pages:
 
 ```console
-chromium --headless --incognito --dump-dom https://github.com | monolith - -I -b https://github.com -o github.html
+chromium --headless --window-size=1920,1080 --run-all-compositor-stages-before-draw --virtual-time-budget=9000 --incognito --dump-dom https://github.com | monolith - -I -b https://github.com -o github.html
 ```
 
 
@@ -255,10 +262,3 @@ Please open an issue if something is wrong, that helps make this project better.
 
 To the extent possible under law, the author(s) have dedicated all copyright related and neighboring rights to this software to the public domain worldwide.
 This software is distributed without any warranty.
-
-
----------------------------------------------------
-
-
-<!-- Microtext -->
-<sub>Keep in mind that `monolith` is not aware of your browser’s session</sub>

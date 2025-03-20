@@ -9,41 +9,41 @@
 mod passing {
     use reqwest::blocking::Client;
     use reqwest::Url;
-    use std::collections::HashMap;
 
+    use monolith::cache::Cache;
+    use monolith::core::Options;
     use monolith::css;
-    use monolith::opts::Options;
     use monolith::url::EMPTY_IMAGE_DATA_URL;
 
     #[test]
     fn empty_input() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("data:,").unwrap();
         let options = Options::default();
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, "", &options, 0),
+            css::embed_css(cache, &client, &document_url, "", &options),
             ""
         );
     }
 
     #[test]
     fn trim_if_empty() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("https://doesntmatter.local/").unwrap();
         let options = Options::default();
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, "\t     \t   ", &options, 0,),
+            css::embed_css(cache, &client, &document_url, "\t     \t   ", &options),
             ""
         );
     }
 
     #[test]
     fn style_exclude_unquoted_images() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("https://doesntmatter.local/").unwrap();
         let mut options = Options::default();
@@ -59,7 +59,7 @@ mod passing {
             height: calc(100vh - 10pt)";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &STYLE, &options, 0,),
+            css::embed_css(cache, &client, &document_url, STYLE, &options),
             format!(
                 "/* border: none;*/\
                 background-image: url(\"{empty_image}\"); \
@@ -75,7 +75,7 @@ mod passing {
 
     #[test]
     fn style_exclude_single_quoted_images() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("data:,").unwrap();
         let mut options = Options::default();
@@ -91,7 +91,7 @@ mod passing {
             height: calc(100vh - 10pt)";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &STYLE, &options, 0),
+            css::embed_css(cache, &client, &document_url, STYLE, &options),
             format!(
                 "/* border: none;*/\
                 background-image: url(\"{empty_image}\"); \
@@ -107,7 +107,7 @@ mod passing {
 
     #[test]
     fn style_block() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("file:///").unwrap();
         let mut options = Options::default();
@@ -122,14 +122,14 @@ mod passing {
             html > body {}";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             CSS
         );
     }
 
     #[test]
     fn attribute_selectors() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("https://doesntmatter.local/").unwrap();
         let mut options = Options::default();
@@ -166,14 +166,14 @@ mod passing {
             ";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             CSS
         );
     }
 
     #[test]
     fn import_string() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("https://doesntmatter.local/").unwrap();
         let mut options = Options::default();
@@ -188,7 +188,7 @@ mod passing {
             ";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0,),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             "\
             @charset \"UTF-8\";\n\
             \n\
@@ -201,7 +201,7 @@ mod passing {
 
     #[test]
     fn hash_urls() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("https://doesntmatter.local/").unwrap();
         let mut options = Options::default();
@@ -218,14 +218,14 @@ mod passing {
             ";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0,),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             CSS
         );
     }
 
     #[test]
     fn transform_percentages_and_degrees() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("https://doesntmatter.local/").unwrap();
         let mut options = Options::default();
@@ -240,14 +240,14 @@ mod passing {
             ";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0,),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             CSS
         );
     }
 
     #[test]
     fn unusual_indents() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("https://doesntmatter.local/").unwrap();
         let mut options = Options::default();
@@ -264,14 +264,14 @@ mod passing {
             ";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0,),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             CSS
         );
     }
 
     #[test]
     fn exclude_fonts() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("https://doesntmatter.local/").unwrap();
         let mut options = Options::default();
@@ -312,14 +312,14 @@ mod passing {
             ";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0,),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             CSS_OUT
         );
     }
 
     #[test]
     fn content() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("data:,").unwrap();
         let mut options = Options::default();
@@ -337,14 +337,14 @@ mod passing {
             ";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0,),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             CSS_OUT
         );
     }
 
     #[test]
     fn ie_css_hack() {
-        let cache = &mut HashMap::new();
+        let cache = &mut Some(Cache::new(0, None));
         let client = Client::new();
         let document_url: Url = Url::parse("data:,").unwrap();
         let mut options = Options::default();
@@ -364,7 +364,7 @@ mod passing {
             ";
 
         assert_eq!(
-            css::embed_css(cache, &client, &document_url, &CSS, &options, 0,),
+            css::embed_css(cache, &client, &document_url, CSS, &options),
             CSS_OUT
         );
     }
